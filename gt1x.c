@@ -20,20 +20,17 @@
 #ifdef CONFIG_GTP_TYPE_B_PROTOCOL
 #include <linux/input/mt.h>
 #endif
+#include <linux/msm_drm_notify.h>
 
 static struct input_dev *input_dev;
 static spinlock_t irq_lock;
 static int irq_disabled;
-#ifndef CONFIG_GTP_INT_SEL_SYNC
-#include <linux/pinctrl/consumer.h>
-static struct pinctrl *default_pctrl;
-#endif
 #ifdef CONFIG_OF
-static struct regulator *vdd_ana;
 int gt1x_rst_gpio;
 int gt1x_int_gpio;
 #endif
 
+static struct goodix_ts_data *goodix_ts;
 static int gt1x_register_powermanger(void);
 static int gt1x_unregister_powermanger(void);
 
@@ -246,10 +243,7 @@ static irqreturn_t gt1x_ts_work_thread(int irq, void *data)
 
 	ret = gt1x_i2c_read(GTP_READ_COOR_ADDR, point_data, sizeof(point_data));
 	if (ret < 0) {
-		GTP_ERROR("I2C transfer error!");
-#ifndef CONFIG_GTP_ESD_PROTECT
-		gt1x_power_reset();
-#endif
+		GTP_ERROR("I2C transfer error,read coor points??? fb blank state");
 		goto exit_work_func;
 	}
 
@@ -302,33 +296,186 @@ exit_eint:
 /**
  * gt1x_parse_dt - parse platform infomation form devices tree.
  */
-static int gt1x_parse_dt(struct device *dev)
+static int gt1x_parse_dt(struct device *dev,struct goodix_ts_data *ts)
 {
 	struct device_node *np;
     int ret = 0;
+    u32 temp_val;
 
     if (!dev)
         return -ENODEV;
     
     np = dev->of_node;
-	gt1x_int_gpio = of_get_named_gpio(np, "goodix,irq-gpio", 0);
-	gt1x_rst_gpio = of_get_named_gpio(np, "goodix,reset-gpio", 0);
 
-    if (!gpio_is_valid(gt1x_int_gpio) || !gpio_is_valid(gt1x_rst_gpio)) {
-        GTP_ERROR("Invalid GPIO, irq-gpio:%d, rst-gpio:%d",
-            gt1x_int_gpio, gt1x_rst_gpio);
-        return -EINVAL;
-    }
+    if (of_find_property(np, "vcc_ana-supply", NULL))
+		ts->manage_afe_power_ana = true;
+	if (of_find_property(np, "vcc_dig-supply", NULL))
+		ts->manage_power_dig = true;
 
-    vdd_ana = regulator_get(dev, "vdd_ana");
-    if (IS_ERR(vdd_ana)) {
-	    GTP_ERROR("regulator get of vdd_ana failed");
-	    ret = PTR_ERR(vdd_ana);
-	    vdd_ana = NULL;
-	    return ret;
-    }
+	if (ts->manage_afe_power_ana) {
+		ret = of_property_read_u32(np, "qcom,afe-load", &temp_val);
+		if (!ret) {
+			ts->afe_load_ua = (int) temp_val;
+		} else {
+			dev_err(dev, "Unable to read AFE load\n");
+			return ret;
+		}
+
+		ret = of_property_read_u32(np, "qcom,afe-vtg-min", &temp_val);
+		if (!ret) {
+			ts->afe_vtg_min_uv = (int) temp_val;
+		} else {
+			dev_err(dev, "Unable to read AFE min voltage\n");
+			return ret;
+		}
+
+		ret = of_property_read_u32(np, "qcom,afe-vtg-max", &temp_val);
+		if (!ret) {
+			ts->afe_vtg_max_uv = (int) temp_val;
+		} else {
+			dev_err(dev, "Unable to read AFE max voltage\n");
+			return ret;
+		}
+	}
+	if (ts->manage_power_dig) {
+		ret = of_property_read_u32(np, "qcom,dig-load", &temp_val);
+		if (!ret) {
+			ts->dig_load_ua = (int) temp_val;
+		} else {
+			dev_err(dev, "Unable to read digital load\n");
+			return ret;
+		}
+
+		ret = of_property_read_u32(np, "qcom,dig-vtg-min", &temp_val);
+		if (!ret) {
+			ts->dig_vtg_min_uv = (int) temp_val;
+		} else {
+			dev_err(dev, "Unable to read digital min voltage\n");
+			return ret;
+		}
+
+		ret = of_property_read_u32(np, "qcom,dig-vtg-max", &temp_val);
+		if (!ret) {
+			ts->dig_vtg_max_uv = (int) temp_val;
+		} else {
+			dev_err(dev, "Unable to read digital max voltage\n");
+			return ret;
+		}
+	}
+
+	if (ts->manage_power_dig && ts->manage_afe_power_ana) {
+		ret = of_property_read_u32(np,
+				"qcom,afe-power-on-delay-us", &temp_val);
+		if (!ret)
+			ts->power_on_delay = (u32)temp_val;
+		else
+			dev_info(dev, "Power-On Delay is not specified\n");
+
+		ret = of_property_read_u32(np,
+				"qcom,afe-power-off-delay-us", &temp_val);
+		if (!ret)
+			ts->power_off_delay = (u32)temp_val;
+		else
+			dev_info(dev, "Power-Off Delay is not specified\n");
+
+		dev_dbg(dev, "power-on-delay = %u, power-off-delay = %u\n",
+			ts->power_on_delay, ts->power_off_delay);
+	}
+
+	ts->irq_gpio = of_get_named_gpio(np, "goodix,irq-gpio", 0);
+	if (!gpio_is_valid(ts->irq_gpio))
+	{
+		dev_err(dev, "No valid irq gpio");
+		return -EINVAL;
+	}
+
+	ts->rst_gpio = of_get_named_gpio(np, "goodix,reset-gpio", 0);
+	if (!gpio_is_valid(ts->rst_gpio)){
+		dev_err(dev, "No valid rst gpio");
+		return -EINVAL;
+	}
+
+	ret = of_property_read_u32(np, "irq-flags",
+				   &ts->irq_flags);
+	if (ret) {
+		dev_info(dev,
+			 "Failed get int-trigger-type from dts,set default\n");
+		ts->irq_flags = GTP_INT_TRIGGER;
+	}
+	
+	gt1x_rst_gpio = ts->rst_gpio;
+	gt1x_int_gpio = ts->irq_gpio;
 
     return 0;
+}
+
+#endif
+
+static int gt1x_power_init(struct goodix_ts_data *ts)
+{
+	int error;
+	struct regulator *vcc_ana, *vcc_dig;
+
+	if (ts->manage_afe_power_ana) {
+		vcc_ana = regulator_get(&ts->client->dev, "vcc_ana");
+		if (IS_ERR(vcc_ana)) {
+			error = PTR_ERR(vcc_ana);
+			dev_err(&ts->client->dev,"%s: regulator get failed vcc_ana rc=%d\n",
+				__func__, error);
+			return error;
+		}
+
+		if (regulator_count_voltages(vcc_ana) > 0) {
+			error = regulator_set_voltage(vcc_ana,
+				ts->afe_vtg_min_uv, ts->afe_vtg_max_uv);
+			if (error) {
+				dev_err(&ts->client->dev,"%s: regulator set vtg failed vcc_ana rc=%d\n",
+					__func__, error);
+				regulator_put(vcc_ana);
+				return error;
+			}
+		}
+		ts->vcc_ana = vcc_ana;
+	}
+
+	if (ts->manage_power_dig) {
+		vcc_dig = regulator_get(&ts->client->dev, "vcc_dig");
+		if (IS_ERR(vcc_dig)) {
+			error = PTR_ERR(vcc_dig);
+			dev_err(&ts->client->dev,"%s: regulator get failed vcc_dig rc=%d\n",
+				__func__, error);
+			return error;
+		}
+
+		if (regulator_count_voltages(vcc_dig) > 0) {
+			error = regulator_set_voltage(vcc_dig,
+				ts->dig_vtg_min_uv, ts->dig_vtg_max_uv);
+			if (error) {
+				dev_err(&ts->client->dev,"%s: regulator set vtg failed vcc_dig rc=%d\n",
+					__func__, error);
+				regulator_put(vcc_dig);
+				return error;
+			}
+		}
+		ts->vcc_dig = vcc_dig;
+	}
+	return 0;
+}
+
+static int gt1x_power_deinit(struct goodix_ts_data *ts)
+{
+	if (ts->vcc_ana)
+		regulator_put(ts->vcc_ana);
+	if (ts->vcc_dig)
+		regulator_put(ts->vcc_dig);
+
+	return 0;
+}
+
+static int reg_set_load_check(struct regulator *reg, int load_uA)
+{
+	return (regulator_count_voltages(reg) > 0) ?
+		regulator_set_load(reg, load_uA) : 0;
 }
 
 /**
@@ -338,28 +485,89 @@ static int gt1x_parse_dt(struct device *dev)
  */
 int gt1x_power_switch(int on)
 {
-
 	int ret;
-	struct i2c_client *client = gt1x_i2c_client;
+	struct goodix_ts_data *ts;
 
-    if (!client || !vdd_ana)
-        return -1;
-	
-	if (on) {
-		GTP_DEBUG("GTP power on.");
-		ret = regulator_enable(vdd_ana);
-	} else {
-		GTP_DEBUG("GTP power off.");
-		ret = regulator_disable(vdd_ana);
+	ts = goodix_ts;
+
+	if (!ts->vcc_ana)
+		dev_err(&ts->client->dev,"%s: analog regulator is not available\n", __func__);
+
+	if (!ts->vcc_dig)
+		dev_err(&ts->client->dev,"%s: digital regulator is not available\n", __func__);
+
+	if (!ts->vcc_ana && !ts->vcc_dig) {
+		dev_err(&ts->client->dev,"%s: no regulators available\n", __func__);
+		return -EINVAL;
 	}
-	
-	usleep(10000);
-	return ret;
-	
-}
-#endif
 
-static void gt1x_release_resource(void)
+	if (!ts)
+		goto reg_off;
+
+	if (ts->regulator_enabled) {
+		dev_info(&ts->client->dev,"%s: regulator already enabled\n", __func__);
+		return 0;
+	}
+
+	if (ts->vcc_ana) {
+		ret = reg_set_load_check(ts->vcc_ana,
+			ts->afe_load_ua);
+		if (ret < 0) {
+			dev_info(&ts->client->dev,"%s: Regulator vcc_ana set_opt failed rc=%d\n",
+				__func__, ret);
+			return ret;
+		}
+
+		ret = regulator_enable(ts->vcc_ana);
+		if (ret) {
+			dev_err(&ts->client->dev,"%s: Regulator vcc_ana enable failed rc=%d\n",
+				__func__, ret);
+			reg_set_load_check(ts->vcc_ana, 0);
+			return ret;
+		}
+	}
+
+	if (ts->vcc_dig) {
+		ret = reg_set_load_check(ts->vcc_dig,
+			ts->dig_load_ua);
+		if (ret < 0) {
+			dev_err(&ts->client->dev,"%s: Regulator vcc_dig set_opt failed rc=%d\n",
+				__func__, ret);
+			return ret;
+		}
+		ret = regulator_enable(ts->vcc_dig);
+		if (ret) {
+			dev_err(&ts->client->dev,"%s: Regulator vcc_dig enable failed rc=%d\n",
+				__func__, ret);
+			reg_set_load_check(ts->vcc_dig, 0);
+			return ret;
+		}
+	}
+
+	ts->regulator_enabled = true;
+
+	return 0;
+
+reg_off:
+	if (!ts->regulator_enabled) {
+		dev_info(&ts->client->dev,"%s: regulator not enabled\n", __func__);
+		return 0;
+	}
+
+	if (ts->vcc_dig) {
+		reg_set_load_check(ts->vcc_dig, 0);
+		regulator_disable(ts->vcc_dig);
+	}
+
+	if (ts->vcc_ana) {
+		reg_set_load_check(ts->vcc_ana, 0);
+		regulator_disable(ts->vcc_ana);
+	}
+	ts->regulator_enabled = false;
+	return 0;
+}
+
+static void gt1x_release_resource(struct goodix_ts_data *ts)
 {
     if (gpio_is_valid(GTP_INT_PORT)) {
 		gpio_direction_input(GTP_INT_PORT);
@@ -371,20 +579,7 @@ static void gt1x_release_resource(void)
 		gpio_free(GTP_RST_PORT);
 	}
 
-#ifndef CONFIG_GTP_INT_SEL_SYNC
-	if (default_pctrl) {
-		pinctrl_put(default_pctrl);
-		default_pctrl = NULL;
-	}
-#endif
-
-#ifdef CONFIG_OF      
-	if (vdd_ana) {
-		gt1x_power_switch(SWITCH_OFF);
-        regulator_put(vdd_ana);
-		vdd_ana = NULL;
-	}
-#endif
+	gt1x_power_deinit(ts);
 
 	if (input_dev) {
 		input_unregister_device(input_dev);
@@ -511,6 +706,55 @@ static s8 gt1x_request_input_dev(void)
 	return 0;
 }
 
+static int gt1x_pinctrl_init(struct goodix_ts_data *ts)
+{
+	int retval = 0;
+
+	ts->ts_pinctrl = devm_pinctrl_get(&ts->client->dev);
+	if (IS_ERR_OR_NULL(ts->ts_pinctrl)) {
+		retval = PTR_ERR(ts->ts_pinctrl);
+		dev_info(&ts->client->dev, "No pinctrl found\n");
+		goto err_pinctrl_get;
+	}
+
+	ts->pinctrl_state_active
+		= pinctrl_lookup_state(ts->ts_pinctrl, "pmx_ts_active");
+	if (IS_ERR_OR_NULL(ts->pinctrl_state_active)) {
+		retval = PTR_ERR(ts->pinctrl_state_active);
+		dev_err(&ts->client->dev,
+			"Can not lookup %s pinstate %d\n",
+			PINCTRL_STATE_ACTIVE, retval);
+		goto err_pinctrl_lookup;
+	}
+
+	ts->pinctrl_state_suspend
+		= pinctrl_lookup_state(ts->ts_pinctrl, "pmx_ts_suspend");
+	if (IS_ERR_OR_NULL(ts->pinctrl_state_suspend)) {
+		retval = PTR_ERR(ts->pinctrl_state_suspend);
+		dev_err(&ts->client->dev,
+			"Can not lookup %s pinstate %d\n",
+			PINCTRL_STATE_SUSPEND, retval);
+		goto err_pinctrl_lookup;
+	}
+
+	ts->pinctrl_state_release
+		= pinctrl_lookup_state(ts->ts_pinctrl, "pmx_ts_release");
+	if (IS_ERR_OR_NULL(ts->pinctrl_state_release)) {
+		retval = PTR_ERR(ts->pinctrl_state_release);
+		dev_err(&ts->client->dev,
+			"Can not lookup %s pinstate %d\n",
+			PINCTRL_STATE_RELEASE, retval);
+	}
+
+	dev_info(&ts->client->dev, "Success init pinctrl\n");
+	return 0;
+err_pinctrl_lookup:
+	devm_pinctrl_put(ts->ts_pinctrl);
+err_pinctrl_get:
+	ts->ts_pinctrl = NULL;
+	return retval;
+}
+
 /**
  * gt1x_ts_probe -   I2c probe.
  * @client: i2c device struct.
@@ -520,6 +764,7 @@ static s8 gt1x_request_input_dev(void)
 static int gt1x_ts_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
 	int ret = -1;
+	struct goodix_ts_data *ts;
 
 	/* do NOT remove these logs */
 	GTP_INFO("GTP Driver Version: %s,slave addr:%02xh",
@@ -533,9 +778,22 @@ static int gt1x_ts_probe(struct i2c_client *client, const struct i2c_device_id *
 		return -ENODEV;
 	}
 
+	ts = devm_kzalloc(&client->dev, sizeof(*ts), GFP_KERNEL);
+	if (!ts) {
+		dev_err(&client->dev, "Failed alloc ts memory\n");
+		devm_kfree(&client->dev, ts);
+		return -EINVAL;
+	}
+
+	ts->client = client;
+
+	i2c_set_clientdata(client, ts);
+
+	goodix_ts = ts;
+
 #ifdef CONFIG_OF	/* device tree support */
 	if (client->dev.of_node) {
-		ret = gt1x_parse_dt(&client->dev);
+		ret = gt1x_parse_dt(&client->dev,ts);
 		if (ret < 0)
 			return -EINVAL;
 	}
@@ -543,24 +801,10 @@ static int gt1x_ts_probe(struct i2c_client *client, const struct i2c_device_id *
 #error [GOODIX]only support devicetree platform
 #endif
 
-	/*
-	 * Pinctrl pull-up state is required by INT gpio if
-	 * your kernel has the output restriction of gpio tied
-	 * to IRQ line(kernel3.13 and later version).
-	 */
-#ifndef CONFIG_GTP_INT_SEL_SYNC
-	default_pctrl = pinctrl_get_select_default(&client->dev);
-	if (IS_ERR(default_pctrl)) {
-		GTP_ERROR("Please add default pinctrl state"
-				"(pull-up irq-gpio)");
-		return PTR_ERR(default_pctrl);
-	}
-#endif
-
-	/* gpio resource */
-	ret = gt1x_request_gpio();
-	if (ret < 0) {
-		GTP_ERROR("GTP request IO port failed.");
+	ret = gt1x_power_init(ts);
+	if (ret) {
+		GTP_ERROR("Failed get regulator");
+		ret = -EINVAL;
 		goto exit_clean;
 	}
 
@@ -568,6 +812,33 @@ static int gt1x_ts_probe(struct i2c_client *client, const struct i2c_device_id *
 	ret = gt1x_power_switch(SWITCH_ON);
 	if (ret < 0) {
 		GTP_ERROR("Power on failed");
+		goto exit_clean;
+	}
+
+	ret = gt1x_pinctrl_init(ts);
+	if (ret < 0) {
+		/* if define pinctrl must define the following state
+		 * to let int-pin work normally: default, int_output_high,
+		 * int_output_low, int_input
+		 */
+		GTP_ERROR("Failed get wanted pinctrl state");
+		goto exit_clean;
+	}
+
+	/*
+	* Pinctrl handle is optional. If pinctrl handle is found
+	* let pins to be configured in active state. If not
+	* found continue further without error.
+     */
+	ret = pinctrl_select_state(ts->ts_pinctrl, ts->pinctrl_state_active);
+	if (ret < 0) {
+		GTP_ERROR("Failed to select %s pinstate %d",PINCTRL_STATE_ACTIVE, ret);
+     }
+
+	/* gpio resource */
+	ret = gt1x_request_gpio();
+	if (ret < 0) {
+		GTP_ERROR("GTP request IO port failed.");
 		goto exit_clean;
 	}
 
@@ -624,7 +895,9 @@ err_irq:
 err_input:
 	gt1x_deinit();
 exit_clean:
-	gt1x_release_resource();
+	gt1x_release_resource(ts);
+	devm_kfree(&client->dev, ts);
+	i2c_set_clientdata(client, NULL);
 	GTP_ERROR("GTP probe failed:%d", ret);
 	return -ENODEV;
 }
@@ -636,123 +909,72 @@ exit_clean:
  */
 static int gt1x_ts_remove(struct i2c_client *client)
 {
+	struct goodix_ts_data * ts ;
+
 	GTP_INFO("GTP driver removing...");
+
+	ts = i2c_get_clientdata(client);
+
 	gt1x_unregister_powermanger();
 
     gt1x_deinit();
-    gt1x_release_resource();
+    gt1x_release_resource(ts);
 
     return 0;
 }
 
-#if   defined(CONFIG_FB)	
+
 /* frame buffer notifier block control the suspend/resume procedure */
-static struct notifier_block gt1x_fb_notifier;
+static struct notifier_block gt1x_dis_panel_notifier;
 
-static int gtp_fb_notifier_callback(struct notifier_block *noti, unsigned long event, void *data)
+static int gt1x_dis_panel_notifier_callback(struct notifier_block *self, unsigned long event, void *data)
 {
-	struct fb_event *ev_data = data;
-	int *blank;
+	struct msm_drm_notifier *evdata = data;
+	int blank;
 
-#ifdef CONFIG_GTP_INCELL_PANEL
-#ifndef FB_EARLY_EVENT_BLANK
-	#error Need add FB_EARLY_EVENT_BLANK to fbmem.c
-#endif
+	if (!evdata || (evdata->id != 0))
+		return 0;
     
-	if (ev_data && ev_data->data && event == FB_EARLY_EVENT_BLANK) {
-		blank = ev_data->data;
-        if (*blank == FB_BLANK_UNBLANK) {
-			GTP_DEBUG("Resume by fb notifier.");
-			gt1x_resume();
-        }
-    }
-#else
-	if (ev_data && ev_data->data && event == FB_EVENT_BLANK) {
-		blank = ev_data->data;
-        if (*blank == FB_BLANK_UNBLANK) {
-			GTP_DEBUG("Resume by fb notifier.");
-			gt1x_resume();
-        }
-    }
-#endif
-
-	if (ev_data && ev_data->data && event == FB_EVENT_BLANK) {
-		blank = ev_data->data;
-        if (*blank == FB_BLANK_POWERDOWN) {
-			GTP_DEBUG("Suspend by fb notifier.");
+	if (event == MSM_DRM_EARLY_EVENT_BLANK) {
+		blank = *(int *)(evdata->data);
+        if ( blank == MSM_DRM_BLANK_UNBLANK) {
+			GTP_INFO("%s receives EARLY_BLANK:UNBLANK",__func__);
+        }else if (blank == MSM_DRM_BLANK_POWERDOWN) {
+			GTP_INFO("%s: receives EARLY_BLANK:POWERDOWN\n",
+				__func__);
 			gt1x_suspend();
+		} else {
+			GTP_INFO("%s: receives wrong data EARLY_BLANK:%d\n",
+				__func__, blank);
+		}
+	}
+
+	if ( event == MSM_DRM_EVENT_BLANK) {
+		blank = *(int *)(evdata->data);
+		if (blank == MSM_DRM_BLANK_POWERDOWN) {
+			GTP_INFO("%s: receives BLANK:POWERDOWN\n", __func__);
+		} else if (blank == MSM_DRM_BLANK_UNBLANK) {
+			GTP_INFO("%s: receives BLANK:UNBLANK\n", __func__);
+			 gt1x_resume();
+		} else {
+			GTP_INFO("%s: receives wrong data BLANK:%d\n",
+				__func__, blank);
 		}
 	}
 
 	return 0;
 }
-#elif defined(CONFIG_PM)
-/**
- * gt1x_ts_suspend - i2c suspend callback function.
- * @dev: i2c device.
- * Return  0: succeed, -1: failed.
- */
-static int gt1x_pm_suspend(struct device *dev)
-{
-    return gt1x_suspend();
-}
-
-/**
- * gt1x_ts_resume - i2c resume callback function.
- * @dev: i2c device.
- * Return  0: succeed, -1: failed.
- */
-static int gt1x_pm_resume(struct device *dev)
-{
-	return gt1x_resume();
-}
-
-/* bus control the suspend/resume procedure */
-static const struct dev_pm_ops gt1x_ts_pm_ops = {
-	.suspend = gt1x_pm_suspend,
-	.resume = gt1x_pm_resume,
-};
-
-#elif defined(CONFIG_HAS_EARLYSUSPEND)
-/* earlysuspend module the suspend/resume procedure */
-static void gt1x_ts_early_suspend(struct early_suspend *h)
-{
-	gt1x_suspend();
-}
-
-static void gt1x_ts_late_resume(struct early_suspend *h)
-{
-	gt1x_resume();
-}
-
-static struct early_suspend gt1x_early_suspend = {
-	.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN + 1,
-	.suspend = gt1x_ts_early_suspend,
-	.resume = gt1x_ts_late_resume,
-};
-#endif
-
 
 static int gt1x_register_powermanger(void)
 {
-#if   defined(CONFIG_FB)
-	gt1x_fb_notifier.notifier_call = gtp_fb_notifier_callback;
-	fb_register_client(&gt1x_fb_notifier);
-	
-#elif defined(CONFIG_HAS_EARLYSUSPEND)
-	register_early_suspend(&gt1x_early_suspend);
-#endif	
+	gt1x_dis_panel_notifier.notifier_call = gt1x_dis_panel_notifier_callback;
+	msm_drm_register_client(&gt1x_dis_panel_notifier);
 	return 0;
 }
 
 static int gt1x_unregister_powermanger(void)
 {
-#if   defined(CONFIG_FB)
-	fb_unregister_client(&gt1x_fb_notifier);
-		
-#elif defined(CONFIG_HAS_EARLYSUSPEND)
-	unregister_early_suspend(&gt1x_early_suspend);
-#endif
+	msm_drm_unregister_client(&gt1x_dis_panel_notifier);
 	return 0;
 }
 
@@ -777,9 +999,6 @@ static struct i2c_driver gt1x_ts_driver = {
 		   .owner = THIS_MODULE,
 #ifdef CONFIG_OF
 		   .of_match_table = gt1x_match_table,
-#endif
-#if !defined(CONFIG_FB) && defined(CONFIG_PM)
-		   .pm = &gt1x_ts_pm_ops,
 #endif
 		   },
 };

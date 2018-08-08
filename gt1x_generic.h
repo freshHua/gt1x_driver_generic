@@ -255,6 +255,35 @@ typedef enum {
 	CHIP_TYPE_NONE = 0xFF
 } gt1x_chip_type_t;
 
+#define PINCTRL_STATE_ACTIVE    "pmx_ts_active"
+#define PINCTRL_STATE_SUSPEND   "pmx_ts_suspend"
+#define PINCTRL_STATE_RELEASE   "pmx_ts_release"
+
+struct goodix_ts_data {
+    int irq_gpio;
+    int rst_gpio;
+    u32 irq_flags;
+    struct i2c_client *client;
+    struct regulator *vcc_ana;
+    struct regulator *vcc_dig;
+    int afe_load_ua;
+    int afe_vtg_min_uv;
+    int afe_vtg_max_uv;
+    int dig_load_ua;
+    int dig_vtg_min_uv;
+    int dig_vtg_max_uv;
+    bool manage_afe_power_ana;
+    bool manage_power_dig;
+    bool regulator_enabled;
+    u32 power_on_delay;
+    u32 power_off_delay;
+    struct pinctrl *ts_pinctrl;
+    struct pinctrl_state *pinctrl_state_active;
+    struct pinctrl_state *pinctrl_state_suspend;
+    struct pinctrl_state *pinctrl_state_release;
+    struct notifier_block fb_notifier;
+};
+
 #define _ERROR(e)      ((0x01 << e) | (0x01 << (sizeof(s32) * 8 - 1)))
 #define ERROR          _ERROR(1)	//for common use
 //system relevant
@@ -319,7 +348,7 @@ extern void gesture_clear_wakeup_data(void);
 /* Export from gt1x_tpd.c */
 extern void gt1x_touch_down(s32 x, s32 y, s32 size, s32 id);
 extern void gt1x_touch_up(s32 id);
-extern int gt1x_power_switch(s32 state);
+extern int gt1x_power_switch(int state);
 extern void gt1x_irq_enable(void);
 extern void gt1x_irq_disable(void);
 extern int gt1x_debug_proc(u8 * buf, int count);
@@ -432,57 +461,6 @@ extern int gt1x_parse_chr_cfg(int sensor_id);
 
 #define IIC_MAX_TRANSFER_SIZE       250
 
-#ifdef CONFIG_MTK_PLATFORM
-/* MTK platform */
-#include <asm/uaccess.h>
-#ifdef CONFIG_MTK_BOOT
-#include "mt_boot_common.h"
-#endif
-#include <linux/rtpm_prio.h>
-#include <mtk_thermal_typedefs.h>
-#ifndef MT6589
-#include <mt_gpio.h>
-#endif
-#include "tpd.h"
-#include "upmu_common.h"
-
-#define GTP_GPIO_AS_INT(pin) tpd_gpio_as_int(pin)
-#define GTP_GPIO_OUTPUT(pin, level) tpd_gpio_output(pin, level)
-
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 18, 0))
-#define GTP_MTK_LEGACY
-#endif
-
-#define PLATFORM_MTK
-#define GTP_I2C_ADDRESS	0x5D
-#define TPD_I2C_NUMBER		        1
-
-#ifdef CONFIG_MTK_I2C_EXTENSION
-#define TPD_SUPPORT_I2C_DMA         1
-#else
-#define TPD_SUPPORT_I2C_DMA         0
-#endif
-
-#if defined(CONFIG_MTK_LEGACY)
-#define TPD_POWER_SOURCE_CUSTOM	MT6328_POWER_LDO_VGP1
-#endif
-
-#ifdef MT6589
-extern void mt65xx_eint_unmask(unsigned int line);
-extern void mt65xx_eint_mask(unsigned int line);
-#define mt_eint_mask mt65xx_eint_mask
-#define mt_eint_unmask mt65xx_eint_unmask
-#endif
-
-#define IIC_DMA_MAX_TRANSFER_SIZE     250
-#define I2C_MASTER_CLOCK              300
-#define TPD_HAVE_CALIBRATION
-#define TPD_CALIBRATION_MATRIX        {962,0,0,0,1600,0,0,0};
-
-extern void tpd_on(void);
-extern void tpd_off(void);
-
-#else
 /* Generic Platform(Qcom or othter) */
 #ifdef CONFIG_OF
 extern int gt1x_rst_gpio;
@@ -499,8 +477,6 @@ extern int gt1x_int_gpio;
 #define GTP_GPIO_OUTPUT(pin,level)	gpio_direction_output(pin,level)
 #define GTP_IRQ_TAB					{IRQ_TYPE_EDGE_RISING, IRQ_TYPE_EDGE_FALLING,\
 		IRQ_TYPE_LEVEL_LOW, IRQ_TYPE_LEVEL_HIGH}
-
-#endif /* CONFIG_MTK_PLATFORM */
 
 #endif // _GT1X_GENERIC_H_
 

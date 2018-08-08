@@ -1038,6 +1038,7 @@ static s32 gt1x_enter_sleep(void)
 {
 #ifdef CONFIG_GTP_POWER_CTRL_SLEEP
 	gt1x_power_switch(SWITCH_OFF);
+	GTP_INFO("Sleep by power down");
 	return 0;
 #else
 	{
