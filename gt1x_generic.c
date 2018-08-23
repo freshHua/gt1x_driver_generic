@@ -1034,8 +1034,10 @@ s32 gt1x_get_chip_type(void)
  * 
  * Returns  0--success,non-0--fail.
  */
-static s32 gt1x_enter_sleep(void)
+static s32 gt1x_enter_sleep(struct goodix_ts_data*ts)
 {
+	int ret;
+
 #ifdef CONFIG_GTP_POWER_CTRL_SLEEP
 	gt1x_power_switch(SWITCH_OFF);
 	GTP_INFO("Sleep by power down");
@@ -1043,12 +1045,10 @@ static s32 gt1x_enter_sleep(void)
 #else
 	{
 		s32 retry = 0;
-#ifdef CONFIG_GTP_INT_SEL_SYNC
-		if (gt1x_wakeup_level == 1)
-			/* high level wakeup */
-			GTP_GPIO_OUTPUT(GTP_INT_PORT, 0);
-		msleep(5);
-#endif
+		
+		if (ts->ts_pinctrl){
+		 	ret = pinctrl_select_state(ts->ts_pinctrl,ts->pinctrl_state_suspend);
+        }
 
 		while (retry++ < 3) {
 			if (!gt1x_send_cmd(GTP_CMD_SLEEP, 0)) {
@@ -1069,7 +1069,7 @@ static s32 gt1x_enter_sleep(void)
  * 
  * Return: 0--success,non-0--fail.
  */
-static s32 gt1x_wakeup_sleep(void)
+static s32 gt1x_wakeup_sleep(struct goodix_ts_data*ts)
 {
 #ifndef CONFIG_GTP_POWER_CTRL_SLEEP
 	u8 retry = 0;
@@ -2267,7 +2267,7 @@ static void gt1x_charger_work_func(struct work_struct *work)
 }
 #endif
 
-int gt1x_suspend(void)
+int gt1x_suspend(struct goodix_ts_data*ts)
 {
 	s32 ret = -1;
 #if defined(CONFIG_GTP_HOTKNOT) && !defined(CONFIG_HOTKNOT_BLOCK_RW)
@@ -2329,7 +2329,7 @@ int gt1x_suspend(void)
 	} else
 #endif
 	{
-		ret = gt1x_enter_sleep();
+		ret = gt1x_enter_sleep(ts);
 		if (ret < 0) {
 			GTP_ERROR("Suspend failed.");
 		}
@@ -2342,7 +2342,7 @@ int gt1x_suspend(void)
 	return 0;
 }
 
-int gt1x_resume(void)
+int gt1x_resume(struct goodix_ts_data*ts)
 {
 	s32 ret = -1;
 	
@@ -2388,7 +2388,7 @@ int gt1x_resume(void)
     	}
 #endif
 
-	ret = gt1x_wakeup_sleep();
+	ret = gt1x_wakeup_sleep(ts);
 	if (ret < 0) {
 		GTP_ERROR("Resume failed.");
 	}

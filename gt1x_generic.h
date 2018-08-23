@@ -281,7 +281,7 @@ struct goodix_ts_data {
     struct pinctrl_state *pinctrl_state_active;
     struct pinctrl_state *pinctrl_state_suspend;
     struct pinctrl_state *pinctrl_state_release;
-    struct notifier_block fb_notifier;
+    struct notifier_block dis_panel_notifier;
 };
 
 #define _ERROR(e)      ((0x01 << e) | (0x01 << (sizeof(s32) * 8 - 1)))
@@ -425,8 +425,8 @@ extern s32 gt1x_reset_guitar(void);
 extern void gt1x_power_reset(void);
 extern int gt1x_parse_config(char *filename, u8 * gt1x_config);
 extern s32 gt1x_touch_event_handler(u8 * data, struct input_dev *dev, struct input_dev *pen_dev);
-extern int gt1x_suspend(void);
-extern int gt1x_resume(void);
+extern int gt1x_suspend(struct goodix_ts_data*ts);
+extern int gt1x_resume(struct goodix_ts_data*ts);
 
 #ifdef CONFIG_GTP_HAVE_TOUCH_KEY
 extern const u16 gt1x_touch_key_array[];

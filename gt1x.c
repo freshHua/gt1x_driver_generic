@@ -31,8 +31,8 @@ int gt1x_int_gpio;
 #endif
 
 static struct goodix_ts_data *goodix_ts;
-static int gt1x_register_powermanger(void);
-static int gt1x_unregister_powermanger(void);
+static int gt1x_register_powermanger(struct goodix_ts_data *ts);
+static int gt1x_unregister_powermanger(struct goodix_ts_data *ts);
 
 /**
  * gt1x_i2c_write - i2c write.
@@ -887,7 +887,7 @@ static int gt1x_ts_probe(struct i2c_client *client, const struct i2c_device_id *
 	} while (0);
 #endif
 
-	gt1x_register_powermanger();
+	gt1x_register_powermanger(ts);
 	gt1x_irq_enable();
 	return 0;
 
@@ -915,7 +915,7 @@ static int gt1x_ts_remove(struct i2c_client *client)
 
 	ts = i2c_get_clientdata(client);
 
-	gt1x_unregister_powermanger();
+	gt1x_unregister_powermanger(ts);
 
     gt1x_deinit();
     gt1x_release_resource(ts);
@@ -925,12 +925,12 @@ static int gt1x_ts_remove(struct i2c_client *client)
 
 
 /* frame buffer notifier block control the suspend/resume procedure */
-static struct notifier_block gt1x_dis_panel_notifier;
-
 static int gt1x_dis_panel_notifier_callback(struct notifier_block *self, unsigned long event, void *data)
 {
 	struct msm_drm_notifier *evdata = data;
 	int blank;
+	struct goodix_ts_data *ts =
+	container_of(self, struct goodix_ts_data, dis_panel_notifier);
 
 	if (!evdata || (evdata->id != 0))
 		return 0;
@@ -942,7 +942,7 @@ static int gt1x_dis_panel_notifier_callback(struct notifier_block *self, unsigne
         }else if (blank == MSM_DRM_BLANK_POWERDOWN) {
 			GTP_INFO("%s: receives EARLY_BLANK:POWERDOWN\n",
 				__func__);
-			gt1x_suspend();
+			gt1x_suspend(ts);
 		} else {
 			GTP_INFO("%s: receives wrong data EARLY_BLANK:%d\n",
 				__func__, blank);
@@ -955,7 +955,7 @@ static int gt1x_dis_panel_notifier_callback(struct notifier_block *self, unsigne
 			GTP_INFO("%s: receives BLANK:POWERDOWN\n", __func__);
 		} else if (blank == MSM_DRM_BLANK_UNBLANK) {
 			GTP_INFO("%s: receives BLANK:UNBLANK\n", __func__);
-			 gt1x_resume();
+			 gt1x_resume(ts);
 		} else {
 			GTP_INFO("%s: receives wrong data BLANK:%d\n",
 				__func__, blank);
@@ -965,16 +965,16 @@ static int gt1x_dis_panel_notifier_callback(struct notifier_block *self, unsigne
 	return 0;
 }
 
-static int gt1x_register_powermanger(void)
+static int gt1x_register_powermanger(struct goodix_ts_data *ts)
 {
-	gt1x_dis_panel_notifier.notifier_call = gt1x_dis_panel_notifier_callback;
-	msm_drm_register_client(&gt1x_dis_panel_notifier);
+	ts->dis_panel_notifier.notifier_call = gt1x_dis_panel_notifier_callback;
+	msm_drm_register_client(&ts->dis_panel_notifier);
 	return 0;
 }
 
-static int gt1x_unregister_powermanger(void)
+static int gt1x_unregister_powermanger(struct goodix_ts_data *ts)
 {
-	msm_drm_unregister_client(&gt1x_dis_panel_notifier);
+	msm_drm_unregister_client(&ts->dis_panel_notifier);
 	return 0;
 }
 
